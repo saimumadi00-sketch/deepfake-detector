@@ -1,0 +1,8 @@
+{
+  "name": "deepfake-detector",
+  "version": "1.0.0",
+  "description": "AI-powered deepfake forensic image analyzer using Claude Vision",
+  "main": "deepfake-detector.jsx",
+  "keywords": ["deepfake", "ai", "claude", "forensics", "react"],
+  "license": "MIT"
+}
