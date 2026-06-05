@@ -1,8 +1,8 @@
 {
   "name": "deepfake-detector",
   "version": "1.0.0",
-  "description": "Local browser-side deepfake forensic image analyzer using Transformers.js",
+  "description": "SYNTHSEC browser-side synthetic media forensics terminal using Transformers.js",
   "main": "deepfake-detector.jsx",
-  "keywords": ["deepfake", "ai", "forensics", "react", "transformers-js", "onnx"],
+  "keywords": ["deepfake", "synthetic-media", "forensics", "osint", "threat-intel", "react", "transformers-js", "onnx"],
   "license": "MIT"
 }
