@@ -1,8 +1,8 @@
 {
   "name": "deepfake-detector",
   "version": "1.0.0",
-  "description": "AI-powered deepfake forensic image analyzer using Claude Vision",
+  "description": "Local browser-side deepfake forensic image analyzer using Transformers.js",
   "main": "deepfake-detector.jsx",
-  "keywords": ["deepfake", "ai", "claude", "forensics", "react"],
+  "keywords": ["deepfake", "ai", "forensics", "react", "transformers-js", "onnx"],
   "license": "MIT"
 }
