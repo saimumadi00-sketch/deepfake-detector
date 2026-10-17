@@ -1,8 +1,25 @@
 {
   "name": "deepfake-detector",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
   "description": "SYNTHSEC browser-side synthetic media forensics terminal using Transformers.js",
-  "main": "deepfake-detector.jsx",
   "keywords": ["deepfake", "synthetic-media", "forensics", "osint", "threat-intel", "react", "transformers-js", "onnx"],
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.7.5",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.7.0",
+    "vite": "6.4.4",
+    "vitest": "3.2.7"
+  }
 }
