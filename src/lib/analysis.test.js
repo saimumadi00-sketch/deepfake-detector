@@ -113,6 +113,15 @@ describe("formatProbability", () => {
     expect(formatProbability(0)).toBe("0%");
   });
 
+  it.each([
+    [0.001, "0.1%"], [0.004, "0.4%"], [0.996, "99.6%"], [0.999, "99.9%"],
+    [0.1999, "<20%"], [0.2001, ">20%"], [0.7999, "<80%"], [0.8001, ">80%"],
+    [0.2 - Number.EPSILON, "<20%"], [0.2 + Number.EPSILON, ">20%"],
+    [0.8 - Number.EPSILON, "<80%"], [0.8 + Number.EPSILON, ">80%"],
+  ])("keeps %s on the correct side of display boundaries", (p, label) => {
+    expect(formatProbability(p)).toBe(label);
+  });
+
   it("uses whole percents elsewhere and at exact thresholds", () => {
     expect(formatProbability(0.537)).toBe("54%");
     expect(formatProbability(0.8)).toBe("80%");

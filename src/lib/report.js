@@ -33,6 +33,7 @@ export function buildReport({ result, file, model, runtime, appVersion, generate
     scan: {
       startedAt: result.timestamp,
       durationMs: result.durationMs ?? null,
+      preparedImage: result.image.preparedSize || { width: result.image.width, height: result.image.height },
     },
     model: {
       id: model.id,
@@ -113,6 +114,7 @@ export function reportToText(report) {
     "SCAN",
     `  Started      : ${scan.startedAt}`,
     `  Duration     : ${scan.durationMs == null ? "n/a" : `${Math.round(scan.durationMs)} ms`}`,
+    `  Prepared image: ${scan.preparedImage.width}x${scan.preparedImage.height} (before model preprocessing)`,
     "",
     "MODEL",
     `  ID           : ${model.id}`,

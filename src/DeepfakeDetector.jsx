@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { assess, formatProbability, THRESHOLDS } from "./lib/analysis.js";
 import { decodeViews, loadEngine, MODEL, RUNTIME, scoreViews } from "./lib/engine.js";
 import { describeEngineError, describeReadError, describeScanError } from "./lib/errors.js";
-import { LIMITS, validateFileInfo, validatePixels } from "./lib/ingest.js";
-import { readImageDimensions, scanMetadata } from "./lib/metadata.js";
+import { createValidatedPreview, LIMITS, validateFileInfo } from "./lib/ingest.js";
+import { scanMetadata } from "./lib/metadata.js";
 import { buildReport, findingsToText, formatRawProbability, reportFilename, reportToText } from "./lib/report.js";
 import packageInfo from "../package.json";
 
@@ -252,9 +252,6 @@ export default function DeepfakeDetector() {
     setClipboardState("");
     clearImage();
     fileObjectRef.current = file;
-    const url = URL.createObjectURL(file);
-    objectUrlRef.current = url;
-    setImageUrl(url);
     setPhase("reading");
 
     let buffer;
@@ -266,11 +263,7 @@ export default function DeepfakeDetector() {
     }
     if (!isCurrent(token)) return;
 
-    // Refuse decompression bombs from the header, before decoding allocates.
     const name = file.name || "unnamed file";
-    const tooLarge = validatePixels(name, readImageDimensions(new Uint8Array(buffer)));
-    if (tooLarge) return rejectFile(token, tooLarge);
-
     let hash;
     try {
       hash = await sha256Hex(buffer);
@@ -280,25 +273,21 @@ export default function DeepfakeDetector() {
     }
     if (!isCurrent(token)) return;
 
-    const bitmap = await createImageBitmap(file).catch(() => null);
-    if (!isCurrent(token)) {
-      bitmap?.close();
-      return;
+    try {
+      const preview = await createValidatedPreview(file, buffer, () => isCurrent(token));
+      if (!preview) return;
+      // Reset/replacement can run between the helper resolving and this turn.
+      if (!isCurrent(token)) {
+        URL.revokeObjectURL(preview.url);
+        return;
+      }
+      objectUrlRef.current = preview.url;
+      setImageUrl(preview.url);
+      setAsset({ id: hash, name, type: file.type || "unknown", size: file.size, buffer, width: preview.width, height: preview.height });
+      setPhase("ready");
+    } catch (error) {
+      rejectFile(token, error.message);
     }
-    if (!bitmap) {
-      return rejectFile(
-        token,
-        `"${name}" could not be decoded as an image. It may be corrupt, truncated, or in a format this browser cannot read.`,
-      );
-    }
-    const dimensions = { width: bitmap.width, height: bitmap.height };
-    bitmap.close();
-    // Formats whose header isn't parsed (AVIF, HEIC) are size-checked here.
-    const tooLargeDecoded = validatePixels(name, dimensions);
-    if (tooLargeDecoded) return rejectFile(token, tooLargeDecoded);
-
-    setAsset({ id: hash, name, type: file.type || "unknown", size: file.size, buffer, ...dimensions });
-    setPhase("ready");
   };
 
   const takeFiles = (files) => {
@@ -349,11 +338,11 @@ export default function DeepfakeDetector() {
       if (!isCurrent(token)) return;
 
       step(2);
-      const views = await scoreViews(classifierRef.current, decoded.views);
-      if (!isCurrent(token)) return;
+      const views = await scoreViews(classifierRef.current, decoded.views, () => isCurrent(token));
+      if (!isCurrent(token) || !views) return;
 
       step(3);
-      const image = { width: decoded.width, height: decoded.height };
+      const image = { width: decoded.width, height: decoded.height, preparedSize: decoded.preparedSize };
       const assessment = assess({ views, image, metadata, model: MODEL });
 
       step(4);
@@ -377,8 +366,8 @@ export default function DeepfakeDetector() {
     }
   };
 
-  // Keeps the file; the in-flight inference finishes in the background and
-  // its result is discarded.
+  // Keeps the file. A running model call finishes in the background; queued
+  // work and remaining views are skipped once their token is stale.
   const cancelScan = () => {
     nextToken();
     setScanLine(0);
@@ -1054,6 +1043,12 @@ export default function DeepfakeDetector() {
                 </div>
               )}
               {!imageUrl && ingestMessages}
+              {!imageUrl && phase === "reading" && (
+                <div>
+                  <p className="microcopy" role="status">VALIDATING &amp; HASHING: {fileObjectRef.current?.name}</p>
+                  <button className="action-btn secondary" onClick={reset}>CLEAR</button>
+                </div>
+              )}
               {imageUrl && (
                 <>
                   <div className="preview-wrap">

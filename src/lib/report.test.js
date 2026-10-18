@@ -21,13 +21,12 @@ const metadata = {
   format: { name: "JPEG", lossy: true },
 };
 
-function makeReport(logits) {
+function makeReport(logits, image = { width: 1024, height: 1024 }) {
   const views = logits.map((logit, i) => ({
     name: i ? "Mirrored" : "Original",
     logit,
     fakeProbability: 1 / (1 + Math.exp(-logit)),
   }));
-  const image = { width: 1024, height: 1024 };
   const result = {
     ...assess({ views, image, metadata, model }),
     views,
@@ -52,7 +51,7 @@ describe("buildReport", () => {
   it("identifies the file, scan and model", () => {
     expect(report.schema).toBe(REPORT_SCHEMA);
     expect(report.file).toMatchObject({ name: "suspect.jpg", sha256, sizeBytes: 520_704, width: 1024, detectedFormat: "JPEG" });
-    expect(report.scan).toEqual({ startedAt: "2026-10-17T07:54:14.382Z", durationMs: 812.4 });
+    expect(report.scan).toEqual({ startedAt: "2026-10-17T07:54:14.382Z", durationMs: 812.4, preparedImage: { width: 1024, height: 1024 } });
     expect(report.model).toMatchObject({ id: "org/detector", revision: model.revision, dtype: "uint8" });
   });
 
@@ -73,6 +72,15 @@ describe("buildReport", () => {
 
   it("survives a JSON round trip unchanged", () => {
     expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+  });
+
+  it("records the reduced analysis resolution while preserving the source dimensions", () => {
+    const reduced = makeReport([-5, -6], { width: 30000, height: 400, preparedSize: { width: 4096, height: 55 } });
+    expect(reduced.file).toMatchObject({ width: 30000, height: 400 });
+    expect(reduced.scan.preparedImage).toEqual({ width: 4096, height: 55 });
+    expect(reduced.interpretation.verdict).toBe("INCONCLUSIVE");
+    expect(reduced.interpretation.reasons.some((r) => r.title.includes("4096×55"))).toBe(true);
+    expect(reportToText(reduced)).toContain("4096x55 (before model preprocessing)");
   });
 });
 

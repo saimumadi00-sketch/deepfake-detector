@@ -147,7 +147,7 @@ On Netlify or Cloudflare Pages, these go in a `_headers` file in `public/`. Vite
    | Decoding | the browser must be able to decode it; corrupt files are rejected here |
 
    A rejected replacement leaves the current image and result untouched.
-3. **Preview and SHA-256:** the preview shows straight away. The SHA-256 of the exact file bytes becomes the report's asset ID. Hashing needs a secure context, so open the app over HTTPS or via `localhost`, not a plain-HTTP LAN address.
+3. **Preview and SHA-256:** the preview appears after hashing, decoding and dimension checks finish. No preview URL is created for an oversized or undecodable image. The SHA-256 of the exact file bytes becomes the report's asset ID. Hashing needs a secure context, so open the app over HTTPS or via `localhost`, not a plain-HTTP LAN address.
 4. **Scan:** available once the engine shows **ENGINE READY**. The top-right panel shows overall model download progress in MB.
 5. **Controls:**
    - **REPLACE FILE** and **CLEAR** before a scan
@@ -156,11 +156,11 @@ On Netlify or Cloudflare Pages, these go in a `_headers` file in `public/`. Vite
    - **EXPORT TEXT**, **EXPORT JSON**, **COPY FINDINGS** and **SCAN ANOTHER** after a result
    - **RETRY ENGINE LOAD** if the model download fails
 
-**Stale work never reaches the screen.** Loading or replacing a file, starting or cancelling a scan, and clearing each start a new generation. Hashing or inference still running from an earlier generation finishes in the background, and its output is discarded. Inference runs one scan at a time (the ONNX session cannot run two at once), so scanning a replacement immediately after cancelling is safe.
+**Stale work never reaches the screen.** Loading or replacing a file, starting or cancelling a scan, and clearing each start a new generation. Queued scans check this generation before preprocessing and inference, so cancelled or replaced scans are skipped. A preprocessing or model call already in progress finishes in the background, but remaining views are skipped and no partial result is reported. Inference runs one scan at a time (the ONNX session cannot run two at once), so scanning a replacement immediately after cancelling is safe.
 
 ## How a verdict is reached
 
-1. **Metadata scan.** The raw bytes are checked for generator declarations (IPTC `trainedAlgorithmicMedia`, Stable Diffusion WebUI parameters, ComfyUI workflows, Midjourney/DALL-E/Firefly markers), a C2PA manifest, camera/software EXIF, the real container format (from magic bytes, not the file extension), and the JPEG quality, estimated from the quantization table.
+1. **Metadata scan.** Generator declarations come from specific metadata fields: EXIF software tags, uncompressed PNG text fields and XMP in PNG, JPEG or WebP. Recognised declarations include IPTC digital source types, Stable Diffusion WebUI parameters, ComfyUI sampling nodes and complete generator names in software/creator fields. Tool names in captions, JPEG comments or arbitrary bytes do not affect the verdict. Compressed PNG text and unsupported metadata containers are skipped. The scan also checks for a C2PA marker (not verified), camera/software EXIF, the real container format (from magic bytes, not the file extension), and JPEG quality estimated from the quantization table.
 2. **Detector.** [CommunityForensics ViT-S/384](https://huggingface.co/buildborderless/CommunityForensics-DeepfakeDet-ViT) (MIT, CVPR 2025, trained on 2.7M images from 4,803 generators) scores the image and a mirrored copy. Output is `P(generated)`. The model is pinned to commit `ac6ee45`.
 3. **Rules** (`src/lib/analysis.js`, unit tested):
 
@@ -174,6 +174,8 @@ On Netlify or Cloudflare Pages, these go in a `_headers` file in `public/`. Vite
 | Low score on a lossy WebP / AVIF / HEIC under 512px (compression can't be measured) | INCONCLUSIVE |
 | Short side < 128px (outside anything validated) | INCONCLUSIVE |
 | File declares an AI generator in its metadata | **LIKELY SYNTHETIC** |
+
+Resolution checks use the image prepared for the model. The engine limits its longest side to 4096px, which can reduce a panorama's short side below the tested minimum even when the original is large. Results explain any such resize; reports retain both the original dimensions and the prepared dimensions before model preprocessing.
 
 The degradation rule is deliberately asymmetric: compression hides generated images but did not create false positives (see below). So a high score on a poor file still counts, but a low score does not clear it.
 
