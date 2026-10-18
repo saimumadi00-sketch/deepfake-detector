@@ -91,8 +91,8 @@ function drawView(bitmap, width, height, mirrored) {
   return RawImage.fromCanvas(canvas).rgb();
 }
 
-// Decodes the file once and returns its true pixel size plus the two views fed
-// to the model.
+// Keep the source size and the prepared view size separate: limiting the long
+// edge can leave a panorama's short edge below the validated resolution.
 export async function decodeViews(file) {
   const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
   try {
@@ -102,6 +102,7 @@ export async function decodeViews(file) {
     return {
       width: bitmap.width,
       height: bitmap.height,
+      preparedSize: { width: w, height: h },
       views: [
         { name: "Original", image: drawView(bitmap, w, h, false) },
         { name: "Mirrored", image: drawView(bitmap, w, h, true) },
@@ -117,15 +118,20 @@ const sigmoid = (x) => 1 / (1 + Math.exp(-x));
 // The model has a single output logit: sigmoid(logit) is P(generated). The
 // generic image-classification pipeline would softmax that single logit to a
 // constant 1.0, so the model is called directly.
-export function scoreViews(engine, views) {
-  return inferenceQueue(() => runViews(engine, views));
+export function scoreViews(engine, views, isCurrent = () => true) {
+  return inferenceQueue(() => runViews(engine, views, isCurrent));
 }
 
-async function runViews({ processor, model }, views) {
+async function runViews({ processor, model }, views, isCurrent) {
   const scored = [];
   for (const view of views) {
+    // Recheck after leaving the queue and at each async boundary. A running
+    // ONNX call must finish, but stale jobs never start another unit of work.
+    if (!isCurrent()) return null;
     const inputs = await processor(view.image);
+    if (!isCurrent()) return null;
     const { logits } = await model(inputs);
+    if (!isCurrent()) return null;
     const logit = logits.data[0];
     if (logits.data.length !== 1 || !Number.isFinite(logit)) {
       throw new Error(`Model returned ${logits.data.length} outputs; expected one finite logit`);

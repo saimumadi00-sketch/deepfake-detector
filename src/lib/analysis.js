@@ -46,19 +46,24 @@ export const VERDICTS = {
 
 const pct = (p) => `${Math.round(p * 100)}%`;
 
-// Formats a model probability. Rounding to whole percent can land a score on
-// the wrong side of a threshold (0.204 -> "20%" while the verdict says "above
-// 20%"), so values within half a point of a threshold get one decimal.
+// Keep rounded values on the same side of the verdict thresholds, and never
+// round an inexact probability to 0% or 100%.
 export function formatProbability(p) {
   const value = p * 100;
-  // A sigmoid output is never exactly 0 or 1; "0%" / "100%" would overstate
-  // the model's certainty.
-  if (value > 0 && value < 0.05) return "<0.1%";
-  if (value < 100 && value > 99.95) return ">99.9%";
-  const nearThreshold = [THRESHOLDS.noSignal, THRESHOLDS.likelySynthetic].some(
-    (t) => Math.abs(value - t * 100) < 0.5 && value !== t * 100,
+  if (p === 0 || p === 1) return `${value}%`;
+  if (value < 0.1) return "<0.1%";
+  if (value > 99.9) return ">99.9%";
+  const threshold = [THRESHOLDS.noSignal, THRESHOLDS.likelySynthetic].find(
+    (t) => Math.abs(value - t * 100) < 0.5 && p !== t,
   );
-  return nearThreshold ? `${value.toFixed(1)}%` : `${Math.round(value)}%`;
+  if (threshold !== undefined) {
+    const rounded = value.toFixed(1);
+    if (Number(rounded) === threshold * 100) {
+      return `${p < threshold ? "<" : ">"}${threshold * 100}%`;
+    }
+    return `${rounded}%`;
+  }
+  return value < 0.5 || value >= 99.5 ? `${value.toFixed(1)}%` : `${Math.round(value)}%`;
 }
 
 export function band(p) {
@@ -112,8 +117,12 @@ export function assess({ views, image, metadata, model }) {
   // call; 0.49 vs 0.51 is noise inside one band, not instability.
   const bandsDisagree = new Set(scores.map(band)).size > 1;
   const unstable = spread > THRESHOLDS.maxViewSpread || bandsDisagree;
-  const shortSide = Math.min(image.width, image.height);
-  const degraded = degradation(image, metadata || {});
+  // Quality gates apply to the pixels prepared for the processor, rather than
+  // the source dimensions that may have been reduced by the canvas limit.
+  const prepared = image.preparedSize || image;
+  const resized = prepared.width !== image.width || prepared.height !== image.height;
+  const shortSide = Math.min(prepared.width, prepared.height);
+  const degraded = degradation(prepared, metadata || {});
   const generatorMarkers = metadata?.generatorMarkers || [];
   const viewList = views.map((v) => `${v.name} ${formatProbability(v.fakeProbability)}`);
 
@@ -167,11 +176,16 @@ export function assess({ views, image, metadata, model }) {
 
   // 3. Image quality. Asymmetric on purpose: degradation hides generated
   // images but did not create false positives.
+  if (resized) {
+    caveats.push(
+      `The engine resized the source from ${image.width}×${image.height} to ${prepared.width}×${prepared.height} before model preprocessing. Resolution checks use this prepared image; crop to the region of interest and rescan to preserve more detail.`,
+    );
+  }
   if (shortSide < THRESHOLDS.minTestedSide) {
     verdict = "INCONCLUSIVE";
     reasons.push({
       tone: "review",
-      title: `Image too small (${image.width}×${image.height})`,
+      title: `Image too small${resized ? " after resizing" : ""} (${prepared.width}×${prepared.height})`,
       detail: `Shortest side under ${THRESHOLDS.minTestedSide}px is outside anything validated; no score at this size can be trusted.`,
     });
   } else if (degraded.level === "severe") {

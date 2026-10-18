@@ -1,12 +1,73 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { describeEngineError, describeScanError } from "./errors.js";
-import { LIMITS, validateFileInfo, validatePixels } from "./ingest.js";
+import { createValidatedPreview, LIMITS, validateFileInfo, validatePixels } from "./ingest.js";
 import { readImageDimensions } from "./metadata.js";
 import { createDownloadTracker } from "./progress.js";
 import { createSerialQueue } from "./queue.js";
 
 const fixture = (name) => new Uint8Array(readFileSync(new URL(`./fixtures/${name}`, import.meta.url)));
+
+describe("validated previews", () => {
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  const setup = () => {
+    const url = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:validated");
+    const bitmap = { width: 33, height: 17, close: vi.fn() };
+    const decode = vi.fn().mockResolvedValue(bitmap);
+    vi.stubGlobal("createImageBitmap", decode);
+    return { url, bitmap, decode };
+  };
+
+  it("rejects an oversized header before decoding or exposing a URL", async () => {
+    const { url, decode } = setup();
+    const bytes = fixture("dims.png");
+    const view = new DataView(bytes.buffer, bytes.byteOffset);
+    view.setUint32(16, 30000);
+    view.setUint32(20, 30000);
+    await expect(createValidatedPreview({ name: "large.png" }, bytes)).rejects.toThrow(/limit/);
+    expect(decode).not.toHaveBeenCalled();
+    expect(url).not.toHaveBeenCalled();
+  });
+
+  it("waits for decoding and validation before creating a preview", async () => {
+    const { url, bitmap, decode } = setup();
+    let finish;
+    decode.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const file = { name: "small.png" };
+    const pending = createValidatedPreview(file, fixture("dims.png"));
+    expect(url).not.toHaveBeenCalled();
+    finish(bitmap);
+    await expect(pending).resolves.toEqual({ url: "blob:validated", width: 33, height: 17 });
+    expect(bitmap.close).toHaveBeenCalledOnce();
+    expect(url).toHaveBeenCalledWith(file);
+  });
+
+  it("rejects an oversized decoded image even without a known header", async () => {
+    const { url, bitmap } = setup();
+    bitmap.width = bitmap.height = 30000;
+    await expect(createValidatedPreview({ name: "large.avif" }, new Uint8Array(64))).rejects.toThrow(/limit/);
+    expect(bitmap.close).toHaveBeenCalledOnce();
+    expect(url).not.toHaveBeenCalled();
+  });
+
+  it("does not expose corrupt images", async () => {
+    const { url, decode } = setup();
+    decode.mockRejectedValue(new Error("decode failed"));
+    await expect(createValidatedPreview({ name: "bad.png" }, fixture("dims.png"))).rejects.toThrow(/could not be decoded/);
+    expect(url).not.toHaveBeenCalled();
+  });
+
+  it("closes stale decodes without creating a preview after reset or replacement", async () => {
+    const { url, bitmap } = setup();
+    let current = true;
+    const pending = createValidatedPreview({ name: "small.png" }, fixture("dims.png"), () => current);
+    current = false;
+    await expect(pending).resolves.toBeNull();
+    expect(bitmap.close).toHaveBeenCalledOnce();
+    expect(url).not.toHaveBeenCalled();
+  });
+});
 
 describe("validateFileInfo", () => {
   it("accepts a normal image", () => {

@@ -5,20 +5,15 @@
 const HEAD_BYTES = 512 * 1024;
 const TAIL_BYTES = 64 * 1024;
 
-// Markers written by generators or by IPTC's "digital source type" vocabulary.
-// Matching any of these means the file itself declares AI involvement.
-const GENERATOR_MARKERS = [
-  { pattern: /compositeWithTrainedAlgorithmicMedia/, label: "IPTC source type: composite with AI-generated media" },
-  // Case-sensitive: the composite term above uses a capital "T".
-  { pattern: /trainedAlgorithmicMedia/, label: "IPTC source type: AI-generated media" },
-  { pattern: /Steps: \d+, Sampler: /, label: "Stable Diffusion WebUI generation parameters" },
-  { pattern: /"class_type"\s*:/, label: "ComfyUI workflow embedded in file" },
-  { pattern: /Midjourney/i, label: "Midjourney marker" },
-  // The text is decoded as Latin-1, so a UTF-8 "·" (C2 B7) arrives as "Â·".
-  { pattern: /DALL(?:-|·|Â·)?E/, label: "DALL-E marker" },
-  { pattern: /Adobe Firefly/i, label: "Adobe Firefly marker" },
-  { pattern: /NovelAI/i, label: "NovelAI marker" },
-  { pattern: /Stable Diffusion/i, label: "Stable Diffusion marker" },
+// Only match complete tool names in software/creator fields. A caption or
+// JPEG comment discussing a generator does not declare how the image was made.
+const GENERATOR_TOOLS = [
+  { pattern: /^Midjourney(?:\s+v?\d[\w.-]*)?$/i, label: "Midjourney marker" },
+  { pattern: /^DALL(?:-|\u00b7)?E(?:\s+\d[\w.-]*)?$/i, label: "DALL-E marker" },
+  { pattern: /^Adobe Firefly(?:\s+\d[\w.-]*)?$/i, label: "Adobe Firefly marker" },
+  { pattern: /^NovelAI(?:\s+\d[\w.-]*)?$/i, label: "NovelAI marker" },
+  { pattern: /^Stable Diffusion(?: WebUI)?(?:\s+(?:XL|v?\d[\w.-]*))?$/i, label: "Stable Diffusion marker" },
+  { pattern: /^ComfyUI(?:\s+v?\d[\w.-]*)?$/i, label: "ComfyUI software tag" },
 ];
 
 const C2PA_MARKER = /c2pa/;
@@ -35,6 +30,130 @@ function bytesToLatin1(bytes) {
 function sampleText(bytes) {
   if (bytes.length <= HEAD_BYTES + TAIL_BYTES) return bytesToLatin1(bytes);
   return bytesToLatin1(bytes.subarray(0, HEAD_BYTES)) + bytesToLatin1(bytes.subarray(bytes.length - TAIL_BYTES));
+}
+
+// Read bounded, uncompressed text fields from actual image containers. Image
+// data, JPEG comments, and arbitrary trailing bytes are never generator fields.
+function readTextFields(bytes) {
+  const fields = [];
+  let remaining = HEAD_BYTES + TAIL_BYTES;
+  const utf8 = new TextDecoder();
+  const add = (key, value, unicode = false) => {
+    if (value.length > remaining) return;
+    remaining -= value.length;
+    fields.push({ key, value: unicode ? utf8.decode(value) : bytesToLatin1(value) });
+  };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const ascii = (start, end) => bytesToLatin1(bytes.subarray(start, end));
+
+  if (bytes.length >= 8 && ascii(0, 8) === "\x89PNG\r\n\x1a\n") {
+    for (let offset = 8; offset + 12 <= bytes.length;) {
+      const length = view.getUint32(offset);
+      const start = offset + 8;
+      const end = start + length;
+      if (end + 4 > bytes.length) break;
+      const type = ascii(offset + 4, start);
+      if (type === "tEXt" || type === "iTXt") {
+        const data = bytes.subarray(start, end);
+        const separator = data.indexOf(0);
+        if (separator > 0 && separator <= 79) {
+          const key = bytesToLatin1(data.subarray(0, separator));
+          if (type === "tEXt") {
+            add(key, data.subarray(separator + 1));
+          } else if (data[separator + 1] === 0 && data[separator + 2] === 0) {
+            // iTXt: keyword, flag, method, language, translated keyword, text.
+            const languageEnd = data.indexOf(0, separator + 3);
+            const translatedEnd = languageEnd < 0 ? -1 : data.indexOf(0, languageEnd + 1);
+            if (translatedEnd >= 0) add(key, data.subarray(translatedEnd + 1), true);
+          }
+        }
+      }
+      if (type === "IEND") break;
+      offset = end + 4;
+    }
+  } else if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    for (let offset = 2; offset + 4 <= bytes.length;) {
+      if (bytes[offset] !== 0xff) break;
+      const marker = bytes[offset + 1];
+      if (marker === 0xda || marker === 0xd9) break;
+      const length = view.getUint16(offset + 2);
+      const end = offset + 2 + length;
+      if (length < 2 || end > bytes.length) break;
+      const prefix = "http://ns.adobe.com/xap/1.0/\0";
+      if (marker === 0xe1 && ascii(offset + 4, offset + 4 + prefix.length) === prefix) {
+        add("XMP", bytes.subarray(offset + 4 + prefix.length, end), true);
+      }
+      offset = end;
+    }
+  } else if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") {
+    for (let offset = 12; offset + 8 <= bytes.length;) {
+      const length = view.getUint32(offset + 4, true);
+      const end = offset + 8 + length;
+      if (end > bytes.length) break;
+      if (ascii(offset, offset + 4) === "XMP ") add("XMP", bytes.subarray(offset + 8, end), true);
+      offset = end + (length % 2);
+    }
+  }
+  return fields;
+}
+
+// XMP properties can be attributes, text elements, or rdf:resource elements.
+// Only these named properties are considered; descriptive prose is ignored.
+function xmpValues(packet, property) {
+  const xml = packet.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, "");
+  const values = [];
+  const tags = /<[A-Za-z_][\w:.-]*(?:"[^"]*"|'[^']*'|[^'">])*?>/g;
+  const attributes = /\s+([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  for (const [tag] of xml.matchAll(tags)) {
+    for (const match of tag.matchAll(attributes)) {
+      if (match[1].split(":").pop() === property) values.push((match[2] ?? match[3]).trim());
+    }
+  }
+  const elements = new RegExp(`<((?:[\\w.-]+:)?${property})\\b([^>]*?)(?:/>|>([\\s\\S]*?)</\\1\\s*>)`, "g");
+  for (const match of xml.matchAll(elements)) {
+    const resource = /\brdf:resource\s*=\s*["']([^"']+)["']/.exec(match[2]);
+    if (resource) values.push(resource[1].trim());
+    else if (match[3] && !match[3].includes("<")) values.push(match[3].trim());
+  }
+  return values;
+}
+
+function generatorDeclarations(fields, exif) {
+  const markers = new Set();
+  const tool = (value) => {
+    for (const { pattern, label } of GENERATOR_TOOLS) {
+      if (pattern.test(value.trim())) markers.add(label);
+    }
+  };
+  if (exif?.software) tool(exif.software);
+  for (const { key, value } of fields) {
+    if (/^(Software|Source|Generator|CreatorTool)$/i.test(key)) tool(value);
+    if (key === "parameters" && /(?:^|\r?\n)Steps: \d+, Sampler: [^\r\n]+/.test(value)) {
+      markers.add("Stable Diffusion WebUI generation parameters");
+    }
+    if (key === "prompt" || key === "workflow") {
+      try {
+        const workflow = JSON.parse(value);
+        const nodes = key === "workflow" ? workflow?.nodes : Object.values(workflow || {});
+        if (Array.isArray(nodes) && nodes.some((node) => /^(KSampler(?:Advanced)?|SamplerCustom(?:Advanced)?)$/.test(node?.class_type || node?.type))) {
+          markers.add("ComfyUI workflow embedded in file");
+        }
+      } catch {
+        // Ordinary prompts and malformed JSON are not generator declarations.
+      }
+    }
+    if (key === "XMP" || key === "XML:com.adobe.xmp") {
+      for (const creator of xmpValues(value, "CreatorTool")) tool(creator);
+      for (const source of xmpValues(value, "DigitalSourceType")) {
+        if (source === "http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia") {
+          markers.add("IPTC source type: AI-generated media");
+        } else if (source === "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia") {
+          markers.add("IPTC source type: composite with AI-generated media");
+        }
+      }
+    }
+  }
+  return [...markers];
 }
 
 function readAscii(view, offset, length) {
@@ -186,6 +305,37 @@ export function readImageDimensions(bytes) {
   return null;
 }
 
+// VP8X describes container features, not compression. Walk the padded RIFF
+// chunks to find the actual VP8/VP8L bitstream, including animation frames.
+// https://developers.google.com/speed/webp/docs/riff_container
+function webpIsLossless(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const end = Math.min(bytes.length, 8 + view.getUint32(4, true));
+  const scan = (start, limit, allowFrames) => {
+    let lossless = false;
+    for (let offset = start; offset + 8 <= limit;) {
+      const type = bytesToLatin1(bytes.subarray(offset, offset + 4));
+      const length = view.getUint32(offset + 4, true);
+      const dataStart = offset + 8;
+      const dataEnd = dataStart + length;
+      const next = dataEnd + (length % 2);
+      // Unknown/truncated data keeps the existing conservative lossy treatment.
+      if (next > limit) return false;
+      if (type === "VP8 ") return false;
+      if (type === "VP8L") lossless = true;
+      if (type === "ANMF") {
+        // Only one frame nesting level is valid. Its fixed header is 16 bytes.
+        if (!allowFrames || length < 16 || !scan(dataStart + 16, dataEnd, false)) return false;
+        lossless = true;
+      }
+      offset = next;
+    }
+    return lossless;
+  };
+  // An animation is only lossless if every frame's bitstream is lossless.
+  return scan(12, end, true);
+}
+
 // Container format from magic bytes (the browser's MIME type is just the file
 // extension). Lossy formats other than JPEG have no quantization table to read,
 // so their compression level is unknown rather than "clean".
@@ -194,8 +344,7 @@ export function detectFormat(bytes) {
   if (bytes[0] === 0xff && bytes[1] === 0xd8) return { name: "JPEG", lossy: true };
   if (ascii(1, 3) === "PNG") return { name: "PNG", lossy: false };
   if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP") {
-    const chunk = ascii(12, 4);
-    return chunk === "VP8L" ? { name: "WebP (lossless)", lossy: false } : { name: "WebP (lossy)", lossy: true };
+    return webpIsLossless(bytes) ? { name: "WebP (lossless)", lossy: false } : { name: "WebP (lossy)", lossy: true };
   }
   if (ascii(4, 4) === "ftyp") {
     const brand = ascii(8, 4);
@@ -211,8 +360,8 @@ export function scanMetadata(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const text = sampleText(bytes);
 
-  const generatorMarkers = GENERATOR_MARKERS.filter(({ pattern }) => pattern.test(text)).map(({ label }) => label);
   const exif = readJpegExif(bytes);
+  const generatorMarkers = generatorDeclarations(readTextFields(bytes), exif);
 
   return {
     generatorMarkers,
